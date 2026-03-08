@@ -47,6 +47,7 @@ const firebaseConfig = {
 // Initialize Firebase (Compat)
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
+const storage = firebase.storage();
 const ROOT = 'hidden-oven';
 
 // --- Globals & State ---
@@ -1040,7 +1041,7 @@ function showProductModal(id = null) {
     overlay.innerHTML = `
         <div class="modal fade-in">
             <h3 style="margin-bottom:20px; color:var(--gold)">${id ? 'Edit' : 'Add'} Product</h3>
-            <form id="product-form" onsubmit="event.preventDefault(); saveProduct(${id})">
+            <form id="product-form" onsubmit="event.preventDefault(); saveProduct('${id}')">
                 <div class="form-group"><input type="text" id="p-name" class="form-input" placeholder="Name" value="${p.name}" required></div>
                 <div class="form-group">
                     <select id="p-cat" class="form-input">
@@ -1061,10 +1062,15 @@ function showProductModal(id = null) {
                         <input type="checkbox" id="p-preorder" ${p.preorder_enabled ? 'checked' : ''}> Enable Pre-order
                     </label>
                 </div>
-                <div class="form-group"><input type="text" id="p-img" class="form-input" placeholder="Image URL (assets/...)" value="${p.img}"></div>
-                <div class="form-group"><textarea id="p-desc" class="form-input" placeholder="Description">${p.desc}</textarea></div>
-                <div style="display:flex; gap:10px;">
-                    <button type="submit" class="btn btn-gold" style="flex:1">Save</button>
+                <div class="form-group">
+                    <label style="color:var(--text-muted); font-size:0.8rem; display:block; margin-bottom:5px;">Product Image</label>
+                    ${p.img ? `<img src="${p.img}" style="width:100px; height:60px; object-fit:cover; margin-bottom:10px; border-radius:5px; border:1px solid var(--gold);">` : ''}
+                    <input type="file" id="p-image-file" class="form-input" accept="image/*">
+                    <input type="hidden" id="p-img-url" value="${p.img}">
+                </div>
+                <div class="form-group"><textarea id="p-desc" class="form-input" placeholder="Description" style="height:80px;">${p.desc}</textarea></div>
+                <div style="display:flex; gap:10px; margin-top:20px;">
+                    <button type="submit" id="save-btn" class="btn btn-gold" style="flex:1">Save Product</button>
                     <button type="button" class="btn" style="background:#555" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
                 </div>
             </form>
@@ -1074,29 +1080,49 @@ function showProductModal(id = null) {
 }
 
 async function saveProduct(id) {
+    const saveBtn = document.getElementById('save-btn');
     const name = document.getElementById('p-name').value;
     const price = parseInt(document.getElementById('p-price').value);
     const stock = parseInt(document.getElementById('p-stock').value);
     const category = document.getElementById('p-cat').value;
-    const img = document.getElementById('p-img').value;
     const desc = document.getElementById('p-desc').value;
     const preorder_enabled = document.getElementById('p-preorder').checked;
     const min_prep_hours = parseInt(document.getElementById('p-prep').value) || 0;
+    const imgFile = document.getElementById('p-image-file').files[0];
+    let imgUrl = document.getElementById('p-img-url').value;
 
-    const pData = {
-        name, price, stock, category, img, desc,
-        preorder_enabled, min_prep_hours,
-        status: stock > 0 ? 'available' : 'out_of_stock'
-    };
+    try {
+        saveBtn.disabled = true;
+        saveBtn.innerText = "Processing...";
 
-    if (id) {
-        await db.ref(`${ROOT}/products/${id}`).update(pData);
-        showToast("Product Updated");
-    } else {
-        const newId = Date.now().toString();
-        await db.ref(`${ROOT}/products/${newId}`).set(pData);
-        showToast("Product Added");
+        // If a new file is selected, upload it to Firebase Storage
+        if (imgFile) {
+            saveBtn.innerText = "Uploading Image...";
+            const storageRef = storage.ref(`products/${Date.now()}_${imgFile.name}`);
+            const snapshot = await storageRef.put(imgFile);
+            imgUrl = await snapshot.ref.getDownloadURL();
+        }
+
+        const pData = {
+            name, price, stock, category, img: imgUrl, desc,
+            preorder_enabled, min_prep_hours,
+            status: stock > 0 ? 'available' : 'out_of_stock'
+        };
+
+        if (id && id !== 'null' && id !== '') {
+            await db.ref(`${ROOT}/products/${id}`).update(pData);
+            showToast("Product Updated");
+        } else {
+            const newId = Date.now().toString();
+            await db.ref(`${ROOT}/products/${newId}`).set(pData);
+            showToast("Product Added");
+        }
+
+        document.querySelector('.modal-overlay').remove();
+    } catch (err) {
+        console.error("Save product error:", err);
+        alert("Error saving product: " + err.message);
+        saveBtn.disabled = false;
+        saveBtn.innerText = "Save Product";
     }
-
-    document.querySelector('.modal-overlay').remove();
 }

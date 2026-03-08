@@ -46,7 +46,8 @@ const firebaseConfig = {
 
 // Initialize Firebase (Compat)
 firebase.initializeApp(firebaseConfig);
-const db = firebase.firestore();
+const db = firebase.database();
+const ROOT = 'hidden-oven';
 
 // --- Globals & State ---
 let products = [];
@@ -54,37 +55,45 @@ let orders = [];
 let webhooks = [];
 let cart = (JSON.parse(localStorage.getItem('ho_cart')) || []).filter(i => i && i.name); // Filter out corrupted items
 
-// --- Firebase Sync & Listeners ---
+// --- Firebase Realtime Database Sync & Listeners ---
 function initDataSync() {
     // Sync Products
-    db.collection('products').onSnapshot(snapshot => {
-        products = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    db.ref(`${ROOT}/products`).on('value', snapshot => {
+        const val = snapshot.val() || {};
+        products = Object.entries(val).map(([id, data]) => ({ id, ...data }));
         if (products.length === 0) {
-            // First time setup - Migrate from DEFAULT_PRODUCTS or Local
-            console.log("Initializing products collection...");
+            console.log("Initializing products...");
             const initialProducts = JSON.parse(localStorage.getItem('ho_products')) || DEFAULT_PRODUCTS;
             initialProducts.forEach(p => {
                 const { id, ...data } = p;
-                db.collection('products').doc(id.toString()).set(data);
+                db.ref(`${ROOT}/products/${id}`).set(data);
             });
         }
-        // Refresh UI if on relevant pages
         const currentView = window.currentView || 'home';
         if (currentView === 'home' || currentView === 'menu' || currentView === 'admin-products') navigateTo(currentView);
     });
 
     // Sync Orders
-    db.collection('orders').orderBy('time', 'desc').onSnapshot(snapshot => {
-        orders = snapshot.docs.map(doc => ({ docId: doc.id, ...doc.data() }));
+    db.ref(`${ROOT}/orders`).on('value', snapshot => {
+        const val = snapshot.val() || {};
+        orders = Object.entries(val)
+            .map(([docId, data]) => ({ docId, ...data }))
+            .sort((a, b) => new Date(b.time) - new Date(a.time));
         const currentView = window.currentView || 'home';
         if (currentView === 'admin-orders' || currentView === 'admin') navigateTo(currentView);
     });
 
     // Sync Webhooks
-    db.collection('webhooks').onSnapshot(snapshot => {
-        webhooks = snapshot.docs.map(doc => ({ docId: doc.id, ...doc.data() }));
-
-        // Refresh view if on admin-webhooks
+    db.ref(`${ROOT}/webhooks`).on('value', snapshot => {
+        const val = snapshot.val() || {};
+        webhooks = Object.entries(val).map(([docId, data]) => ({ docId, ...data }));
+        // Seed default webhook if none exist
+        if (webhooks.length === 0) {
+            DEFAULT_WEBHOOKS.forEach(w => {
+                const { id, ...data } = w;
+                db.ref(`${ROOT}/webhooks/${id}`).set(data);
+            });
+        }
         const view = window.currentView || 'home';
         if (view === 'admin-webhooks') renderAdminWebhooks();
     });
@@ -94,10 +103,9 @@ function saveCart() {
     localStorage.setItem('ho_cart', JSON.stringify(cart));
 }
 
-// Remove legacy saveDB if needed, or point it to Firestore
 async function saveProductToFirebase(p) {
     const { id, ...data } = p;
-    await db.collection('products').doc(id.toString()).set(data);
+    await db.ref(`${ROOT}/products/${id}`).set(data);
     showToast("Product saved to Cloud");
 }
 
@@ -545,21 +553,21 @@ async function processOrder() {
                 const base64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
                 console.log("[Debug] Slip compressed. New size:", Math.round(base64.length / 1024), "KB");
 
-                // 1. Update Stock
-                const batch = db.batch();
+                // 1. Update Stock (RTDB multi-path update)
+                const stockUpdates = {};
                 for (const item of orderData.items) {
                     const p = products.find(prod => prod.id == item.id);
                     if (p) {
                         const newStock = Math.max(0, p.stock - item.qty);
                         const newStatus = newStock === 0 ? 'out_of_stock' : 'available';
-                        const productRef = db.collection('products').doc(p.id.toString());
-                        batch.update(productRef, { stock: newStock, status: newStatus });
+                        stockUpdates[`${ROOT}/products/${p.id}/stock`] = newStock;
+                        stockUpdates[`${ROOT}/products/${p.id}/status`] = newStatus;
                     }
                 }
-                await batch.commit();
+                await db.ref().update(stockUpdates);
 
                 // 2. Save Order
-                await db.collection('orders').add(orderData);
+                await db.ref(`${ROOT}/orders/${orderData.id}`).set(orderData);
 
                 // 3. Webhook (Now with compressed image)
                 triggerWebhook('order_created', {
@@ -766,7 +774,7 @@ async function toggleProductStatus(id) {
         const newStatus = p.status === 'available' ? 'out_of_stock' : 'available';
         const updateData = { status: newStatus };
         if (newStatus === 'available' && p.stock === 0) updateData.stock = 1;
-        await db.collection('products').doc(id.toString()).update(updateData);
+        await db.ref(`${ROOT}/products/${id}`).update(updateData);
         showToast(`Product ${p.name} is now ${newStatus === 'available' ? 'Available' : 'Sold Out'}`);
     }
 }
@@ -776,10 +784,7 @@ async function changeStock(id, delta) {
     if (p) {
         let newStock = Math.max(0, p.stock + delta);
         const newStatus = newStock > 0 ? 'available' : 'out_of_stock';
-        await db.collection('products').doc(id.toString()).update({
-            stock: newStock,
-            status: newStatus
-        });
+        await db.ref(`${ROOT}/products/${id}`).update({ stock: newStock, status: newStatus });
         showToast(`Stock for ${p.name} updated to ${newStock}`);
     }
 }
@@ -900,21 +905,16 @@ async function saveWebhook() {
         return;
     }
 
-    const newWebhook = {
-        url,
-        secret,
-        events,
-        status: 'active'
-    };
-
-    await db.collection('webhooks').add(newWebhook);
+    const newWebhook = { url, secret, events, status: 'active' };
+    const newKey = db.ref(`${ROOT}/webhooks`).push().key;
+    await db.ref(`${ROOT}/webhooks/${newKey}`).set(newWebhook);
     document.querySelector('.modal-overlay').remove();
     showToast("Webhook Added");
 }
 
 async function deleteWebhook(docId) {
     if (confirm("Delete this webhook?")) {
-        await db.collection('webhooks').doc(docId).delete();
+        await db.ref(`${ROOT}/webhooks/${docId}`).remove();
         showToast("Webhook Deleted");
     }
 }
@@ -1006,21 +1006,17 @@ async function updateOrderStatus(docId, orderId, status) {
     const o = orders.find(x => x.docId === docId);
     if (o) {
         const oldStatus = o.status;
-        await db.collection('orders').doc(docId).update({ status: status });
+        await db.ref(`${ROOT}/orders/${docId}`).update({ status });
         showToast(`Order ${orderId} is now ${status}`);
-
-        // Webhook Triggers (Manual trigger since onSnapshot might be delayed)
-        triggerWebhook('order_status_updated', { id: orderId, oldStatus: oldStatus, newStatus: status });
-        if (status === 'Paid') {
-            triggerWebhook('payment_completed', o);
-        }
+        triggerWebhook('order_status_updated', { id: orderId, oldStatus, newStatus: status });
+        if (status === 'Paid') triggerWebhook('payment_completed', o);
     }
 }
 
 async function deleteOrder(docId) {
     if (confirm("ต้องการลบออเดอร์นี้ใช่หรือไม่?")) {
         try {
-            await db.collection('orders').doc(docId).delete();
+            await db.ref(`${ROOT}/orders/${docId}`).remove();
             showToast("ลบออเดอร์เรียบร้อยแล้ว");
         } catch (err) {
             console.error("Delete error:", err);
@@ -1031,9 +1027,7 @@ async function deleteOrder(docId) {
 
 async function deleteProduct(id) {
     if (confirm("Delete this product?")) {
-        products = products.filter(p => p.id !== id);
-        saveDB();
-        renderAdminProducts();
+        await db.ref(`${ROOT}/products/${id}`).remove();
         showToast("Product Deleted");
     }
 }
@@ -1096,11 +1090,11 @@ async function saveProduct(id) {
     };
 
     if (id) {
-        await db.collection('products').doc(id.toString()).update(pData);
+        await db.ref(`${ROOT}/products/${id}`).update(pData);
         showToast("Product Updated");
     } else {
-        const newId = Date.now();
-        await db.collection('products').doc(newId.toString()).set(pData);
+        const newId = Date.now().toString();
+        await db.ref(`${ROOT}/products/${newId}`).set(pData);
         showToast("Product Added");
     }
 

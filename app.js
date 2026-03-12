@@ -47,7 +47,6 @@ const firebaseConfig = {
 // Initialize Firebase (Compat)
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
-const storage = firebase.storage();
 const ROOT = 'hidden-oven';
 
 // --- Globals & State ---
@@ -1079,6 +1078,34 @@ function showProductModal(id = null) {
     document.body.appendChild(overlay);
 }
 
+// --- Helper: Compress Image to Base64 ---
+function compressImage(file, maxWidth = 600) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = (e) => {
+            const img = new Image();
+            img.src = e.target.result;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                let width = img.width;
+                let height = img.height;
+                if (width > maxWidth) {
+                    height = (maxWidth / width) * height;
+                    width = maxWidth;
+                }
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                resolve(canvas.toDataURL('image/jpeg', 0.7)); // Compress to 70% quality
+            };
+            img.onerror = reject;
+        };
+        reader.onerror = reject;
+    });
+}
+
 async function saveProduct(id) {
     const saveBtn = document.getElementById('save-btn');
     const name = document.getElementById('p-name').value;
@@ -1095,35 +1122,10 @@ async function saveProduct(id) {
         saveBtn.disabled = true;
         saveBtn.innerText = "Processing...";
 
-        // If a new file is selected, upload it to Firebase Storage
+        // If a new file is selected, compress and convert to Base64
         if (imgFile) {
-            console.log("[Debug] Starting image upload for:", imgFile.name);
-            saveBtn.innerText = "Uploading Image...";
-            const storageRef = storage.ref(`products/${Date.now()}_${imgFile.name}`);
-
-            try {
-                imgUrl = await new Promise((resolve, reject) => {
-                    const uploadTask = storageRef.put(imgFile);
-                    uploadTask.on('state_changed',
-                        (snapshot) => {
-                            const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-                            saveBtn.innerText = `Uploading (${Math.round(progress)}%)...`;
-                        },
-                        (error) => {
-                            console.error("[Debug] Upload observer error:", error);
-                            reject(error);
-                        },
-                        async () => {
-                            const url = await uploadTask.snapshot.ref.getDownloadURL();
-                            resolve(url);
-                        }
-                    );
-                });
-                console.log("[Debug] Upload successful, URL:", imgUrl);
-            } catch (uploadErr) {
-                console.error("[Debug] Upload error details:", uploadErr);
-                throw new Error("Upload failed: " + uploadErr.message);
-            }
+            saveBtn.innerText = "Compressing Image...";
+            imgUrl = await compressImage(imgFile);
         }
 
         const pData = {

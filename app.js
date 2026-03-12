@@ -1102,9 +1102,24 @@ async function saveProduct(id) {
             const storageRef = storage.ref(`products/${Date.now()}_${imgFile.name}`);
 
             try {
-                const snapshot = await storageRef.put(imgFile);
-                console.log("[Debug] Upload successful, getting URL...");
-                imgUrl = await snapshot.ref.getDownloadURL();
+                imgUrl = await new Promise((resolve, reject) => {
+                    const uploadTask = storageRef.put(imgFile);
+                    uploadTask.on('state_changed',
+                        (snapshot) => {
+                            const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+                            saveBtn.innerText = `Uploading (${Math.round(progress)}%)...`;
+                        },
+                        (error) => {
+                            console.error("[Debug] Upload observer error:", error);
+                            reject(error);
+                        },
+                        async () => {
+                            const url = await uploadTask.snapshot.ref.getDownloadURL();
+                            resolve(url);
+                        }
+                    );
+                });
+                console.log("[Debug] Upload successful, URL:", imgUrl);
             } catch (uploadErr) {
                 console.error("[Debug] Upload error details:", uploadErr);
                 throw new Error("Upload failed: " + uploadErr.message);

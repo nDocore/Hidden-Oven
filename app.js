@@ -1097,10 +1097,18 @@ async function saveProduct(id) {
 
         // If a new file is selected, upload it to Firebase Storage
         if (imgFile) {
+            console.log("[Debug] Starting image upload for:", imgFile.name);
             saveBtn.innerText = "Uploading Image...";
             const storageRef = storage.ref(`products/${Date.now()}_${imgFile.name}`);
-            const snapshot = await storageRef.put(imgFile);
-            imgUrl = await snapshot.ref.getDownloadURL();
+
+            try {
+                const snapshot = await storageRef.put(imgFile);
+                console.log("[Debug] Upload successful, getting URL...");
+                imgUrl = await snapshot.ref.getDownloadURL();
+            } catch (uploadErr) {
+                console.error("[Debug] Upload error details:", uploadErr);
+                throw new Error("Upload failed: " + uploadErr.message);
+            }
         }
 
         const pData = {
